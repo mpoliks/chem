@@ -1,6 +1,5 @@
 thisProcess.removeOSCRecvFunc(~playbackDispatcher);
 
-
 (
 
 // --------------------------------------------- CONFIG, GLOBALS --//
@@ -12,11 +11,20 @@ thisProcess.openUDPPort(9270);
 ~hwOut = 0;
 ~hwOuts = 16;
 ~pbOuts = 14;
+~players = 20;
+~blobs = Dictionary.new;
+
+~players.do( { arg n;
+	~blobs.putAll(
+		Dictionary[(n) -> Dictionary[ \x -> 0, \x_ -> 0, \xv -> 0, \y -> 0, \z -> 0, \counter -> 0]]);
+});
+
 ~zones = List.newClear(10);
 ~choir = Array.newClear(10);
 ~initLevel = 0.5;
 ~p1 = List.newClear(2);
 ~counter = 0;
+~state = \osc;
 
 ServerOptions.devices;
 Server.default.options.numInputBusChannels = ~hwIns;
@@ -33,6 +41,15 @@ s.waitForBoot {
 
 ~pBuf = Buffer.read(s, thisProcess.nowExecutingPath.dirname +/+ "render.wav");
 
+~ahBuf = Array.new;
+
+a = PathName.new(
+	thisProcess.nowExecutingPath.dirname
+	+/+ "autoharp/");
+a.entries.do({
+	arg path;
+	~ahBuf = ~ahBuf.add(Buffer.read(s, path.fullPath))});
+
 SynthDef(\samplePlayer, {
 
 	arg out = 0, atk = 20, rel = 1, buffer, loop = 0, trig, amp = 0.45;
@@ -48,6 +65,29 @@ SynthDef(\samplePlayer, {
 	sig = PlayBuf.ar(14, buffer, rate: 1, loop: loop, doneAction: 2);
 	sig = (sig * env * amp);
 	Out.ar(out, sig);
+
+}).add;
+
+SynthDef(\mPlayer, {
+
+	arg rate = 1, atk = 0.1, rel = 0.4, cutoff = 500, buf, rq = 4.0, amp = 1.0, out;
+
+	var sig = PlayBuf.ar(
+		1,
+		buf,
+		BufRateScale.ir(buf) * rate,
+		doneAction: 2),
+
+	env = EnvGen.kr(
+			Env.new(
+				[0,1,0],
+				[atk, rel],
+				[1, -1]),
+			doneAction:2);
+
+	sig = BPF.ar(sig, cutoff);
+
+	Out.ar(out, sig * env);
 
 }).add;
 
@@ -72,6 +112,12 @@ SynthDef(\klankSaw, { // filterbank ambience
 	formantAmps = ([0 ,-6,-32,-20,-50]-6).dbamp,
 	formantBandwidths=[80,90,120,130,140],
 
+	env = EnvGen.kr(
+		Env.asr(atk, amp, rel),
+		trig,
+		doneAction: 2
+	),
+
 	sig =
 		Saw.ar((freq + WhiteNoise.ar(2.0)), 0.5, 0.2) +
 		Saw.ar(freq * 1.5, 0.5, 0.2) +
@@ -81,8 +127,6 @@ SynthDef(\klankSaw, { // filterbank ambience
 	temp = Mix(BPF.ar(sig, formantFreqs, formantBandwidths / formantFreqs, formantAmps));
 
 	Decimator.ar(sig, 8);
-
-	sig = sig;
 
 	sig = LPF.ar(sig, cutoff);
 
@@ -95,9 +139,9 @@ SynthDef(\klankSaw, { // filterbank ambience
 
 	//sig = FreeVerb2.ar(sig, sig, 0.75, 0.8, 0.5);
 
-	Out.ar(out, sig * 0.75 * amp);
+	Out.ar(out, sig * 0.75 * amp * env);
 
-	Out.ar(fxout, sig * 1.5 * amp);
+	Out.ar(fxout, sig * 1.5 * amp * env);
 
 }).add;
 
@@ -265,55 +309,104 @@ s.sync;
 
 ~playbackDispatcher = {
 
-	|msg|
+	arg msg;
 
-	var xin, yin, zone;
+	var addr = msg[0].asString, player, counter, zoneFlag = false;
 
-	~counter = (~counter + 1) % 100;
+	if("Pelvis".matchRegexp(addr), {
 
-	if(":tx".matchRegexp(msg[0].asString), {
+		var n1 = ((addr)[2]).asString, n2 = ((addr)[3]).asString, z = List.newClear(10);
 
-	~p1[0] = msg[1];
+		if (n2.matchRegexp("/"), { player = n1.asInteger; },
+			{ player = (n1.asInteger * 10) + n2.asInteger; });
+			//player.postln;
 
-	});
+		player = player - 1;
 
-	if (":ty".matchRegexp(msg[0].asString), {
+		counter = (~blobs.at(player).at(\counter) + 1) % 100;
+		~blobs.at(player).add(\counter -> counter);
 
-	~p1[1] = msg[1];
+		if(":tx".matchRegexp(addr), { ~blobs.at(player).add(\x -> msg[1].asFloat); });
+		if (counter == 0, {
+				~blobs.at(player).add(\xv -> (
+					~blobs.at(player).at(\x) - ~blobs.at(player).at(\x_)
+				).abs);
+				~blobs.at(player).add(\x_ -> msg[1].asFloat);
+				//~blobs.at(player).at(\xv).postln;
+			});
 
-	});
+		if(":ty".matchRegexp(addr), { ~blobs.at(player).add(\y -> msg[1].asFloat); });
 
-	~zones[9] = ~p1[0].gaussCurve(1.0, 1.0, 0.1) + ~p1[1].gaussCurve(1.0, 0.0, 0.1);
-	~zones[0] = ~p1[0].gaussCurve(1.0, 0.6, 0.1) + ~p1[1].gaussCurve(1.0, -0.5, 0.1);
-	~zones[1] = ~p1[0].gaussCurve(1.0, 0.2, 0.1) + ~p1[1].gaussCurve(1.0, -0.5, 0.1);
-	~zones[2] = ~p1[0].gaussCurve(1.0, -0.2, 0.1) + ~p1[1].gaussCurve(1.0, -0.5, 0.1);
-	~zones[3] = ~p1[0].gaussCurve(1.0, -0.6, 0.1) + ~p1[1].gaussCurve(1.0, -0.5, 0.1);
-	~zones[4] = ~p1[0].gaussCurve(1.0, -1.0, 0.1) + ~p1[1].gaussCurve(1.0, 0.0, 0.1);
-	~zones[5] = ~p1[0].gaussCurve(1.0, -0.6, 0.1) + ~p1[1].gaussCurve(1.0, 0.5, 0.1);
-	~zones[6] = ~p1[0].gaussCurve(1.0, -0.2, 0.1) + ~p1[1].gaussCurve(1.0, 0.5, 0.1);
-	~zones[7] = ~p1[0].gaussCurve(1.0, 0.2, 0.1) + ~p1[1].gaussCurve(1.0, 0.5, 0.1);
-	~zones[8] = ~p1[0].gaussCurve(1.0, 0.6, 0.1) + ~p1[1].gaussCurve(1.0, 0.5, 0.1);
+		if(":tz".matchRegexp(addr), { ~blobs.at(player).add(\z -> msg[1].asFloat); });
 
-	if (~counter == 0,
-		{
-			~zones.postln;
-			~zones.maxIndex.postln;
-	});
+		z[9] = ~blobs.at(player).at(\x).gaussCurve(1.0, 1.0, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, 0.0, 0.1);
+		z[0] = ~blobs.at(player).at(\x).gaussCurve(1.0, 0.6, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, -0.5, 0.1);
+		z[1] = ~blobs.at(player).at(\x).gaussCurve(1.0, 0.2, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, -0.5, 0.1);
+		z[2] = ~blobs.at(player).at(\x).gaussCurve(1.0, -0.2, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, -0.5, 0.1);
+		z[3] = ~blobs.at(player).at(\x).gaussCurve(1.0, -0.6, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, -0.5, 0.1);
+		z[4] = ~blobs.at(player).at(\x).gaussCurve(1.0, -1.0, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, 0.0, 0.1);
+		z[5] = ~blobs.at(player).at(\x).gaussCurve(1.0, -0.6, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, 0.5, 0.1);
+		z[6] = ~blobs.at(player).at(\x).gaussCurve(1.0, -0.2, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, 0.5, 0.1);
+		z[7] = ~blobs.at(player).at(\x).gaussCurve(1.0, 0.2, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, 0.5, 0.1);
+		z[8] = ~blobs.at(player).at(\x).gaussCurve(1.0, 0.6, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, 0.5, 0.1);
 
-	~zones.size.do({
-		|i|
-		var amp;
+		~blobs.at(player).add(\map -> z);
+		~blobs.at(player).add(\zone -> z.maxIndex);
 
-		if (~zones[i].notNil, {
-			~synths[i].set(
-					\amp, ~zones[i].linlin(0.0, 2.0, 0.0, 0.6, clip: \minmax)
-				);
 
-			~synths[i].set(
-					\cutoff, 200 + ~zones[i].linlin(0.0, 2.0, 0.0, 1600, clip: \minmax)
-				);
+		switch( ~state,
 
-		});
+			\idle, { },
+
+			\osc, {
+
+				if (((counter == 0) && (~blobs.at(player).at(\zone) != ~blobs.at(player).at(\zone_))), {
+
+
+					~blobs.at(player).add(\zone_ -> ~blobs.at(player).at(\zone));
+
+					~blobs.at(player).at(\zone).postln;
+
+					~blobs.at(player).at(\synth).set(
+						\trig, 0);
+
+					~blobs.at(player).add(\synth ->
+
+						Synth(\klankSaw, [
+								\out, ~dryBus[~blobs.at(player).at(\zone)],
+								\fxout, ~fxBus[~blobs.at(player).at(\zone_)],
+								\freq, 69.7,
+								\trig, 1,
+								\amp, 0.2
+							], ~dryGroup);
+						);
+					});
+
+				},
+
+			\autoharp, {
+
+				if (((counter == 0) && (~blobs.at(player).at(\xv) > 1.1)), {
+
+					var z = rrand(0, 9);
+
+					"trig".postln;
+
+					Pbind( \instrument, \mPlayer, \env, 1,
+					\dur, Pwhite(0.01, 0.3, rrand(2, 12)),
+					\cutoff, Pwhite(800, 16000),
+					\buf, Pshuf(~ahBuf, inf),
+					\out, Pseq(
+						[~dryBus[~blobs.at(player).at(\zone)],
+						~fxBus[~blobs.at(player).at(\zone)]], inf);
+
+				).play; });
+
+			},
+
+			\filters, { },
+
+		);
 
 	});
 
@@ -464,6 +557,36 @@ b = Button(~w, Rect(20, 20, 340, 30))
 				~playback = Synth(\samplePlayer, [
 					\out, ~dryBus[0], \buffer, ~pBuf, \trig, 1]);
 			},
+			0, {
+				~playback.set(
+					\trig, 0);
+			}
+		);
+	});
+
+b = Button(~w, Rect(20, 20, 340, 30))
+	.states_([
+		["Autoharp Test", Color.black, Color.grey],
+		["Test Off", Color.white, Color.grey],
+	])
+	.action_({
+		|state|
+		~targetOverride = true;
+		switch(state.value,
+			1, {
+
+				var z = rrand(0, 9);
+
+				Pbind(
+					\instrument, \mPlayer,
+					\env, 1,
+					\dur, Pwhite(0.01, 0.3, rrand(2, 12)),
+					\cutoff, Pwhite(800, 16000),
+					\buf, Pshuf(~ahBuf, inf),
+					\out, Pseq([~dryBus[0], ~fxBus[0]], inf);
+				).play;
+			},
+
 			0, {
 				~playback.set(
 					\trig, 0);
