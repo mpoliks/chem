@@ -1,27 +1,29 @@
 thisProcess.removeOSCRecvFunc(~playbackDispatcher);
 
+OSCFunc.trace
+
 (
 
 // --------------------------------------------- CONFIG, GLOBALS --//
-~netAddr = NetAddr("127.0.0.1", 5005); //OUT
-~portID = 57122; // IN
 thisProcess.openUDPPort(9270);
 
 ~hwIns = 1;
 ~hwOut = 0;
 ~hwOuts = 16;
 ~pbOuts = 14;
+~subChannel = 14;
 ~players = 20;
 ~blobs = Dictionary.new;
 
 ~players.do( { arg n;
 	~blobs.putAll(
-		Dictionary[(n) -> Dictionary[ \x -> 0, \x_ -> 0, \xv -> 0, \y -> 0, \z -> 0, \counter -> 0]]);
+		Dictionary[(n) -> Dictionary[ \alive -> true, \x -> 0, \x_ -> 0, \xv -> 0, \y -> 0, \z -> 0, \counter -> 0]]);
 });
 
 ~zones = List.newClear(10);
 ~choir = Array.newClear(10);
 ~initLevel = 0.5;
+~ftable = [55, 69.296, 82.41, 92.499, 103.83, 110, 123.47, 138.59, 155.745, 164.81, 184.998, 209.33, 220, 246.94, 330];
 ~p1 = List.newClear(2);
 ~counter = 0;
 ~state = \osc;
@@ -104,13 +106,11 @@ SynthDef(\patchCord, {
 
 SynthDef(\klankSaw, { // filterbank ambience
 
-	arg rate = 1, atk = 2.0, rel =6.0, freq = 440, cutoff = 200,
-	pan = 0, amp = 0.1, fbank1 = 200, fbank2 = 671, fbank3 = 1153, fbank4 = 1723,
-	trig = 0, out, fxout;
+	arg rate = 1, atk = 5.0, rel = 6.0, freq = 440, cutoff = 200, fbank = 400,
+	pan = 0, amp = 0.1, trig = 0, out, fxout;
 
-	var formantFreqs = [800,1150,2900,3900,4950], temp,
-	formantAmps = ([0 ,-6,-32,-20,-50]-6).dbamp,
-	formantBandwidths=[80,90,120,130,140],
+	var freqs = Control.names([\freqs]).kr([800, 1071, 1153, 1723]),
+    ringtimes = Control.names([\ringtimes]).kr([1, 1, 1, 1]), klang, temp,
 
 	env = EnvGen.kr(
 		Env.asr(atk, amp, rel),
@@ -118,30 +118,48 @@ SynthDef(\klankSaw, { // filterbank ambience
 		doneAction: 2
 	),
 
-	sig =
-		Saw.ar((freq + WhiteNoise.ar(2.0)), 0.5, 0.2) +
-		Saw.ar(freq * 1.5, 0.5, 0.2) +
-		Pulse.ar(freq * 2, 0.5, 0.2) +
-		Saw.ar(freq * 0.5, 0.5, 0.2);
+	sig = Mix.ar([
+		Pulse.ar(((0.5 * freq) + WhiteNoise.ar(2.0)), WhiteNoise.ar(0.01), 0.7) +
+		Pulse.ar((freq + WhiteNoise.ar(2.0)) * 1.0001, WhiteNoise.ar(4.0), 0.3),
+		Pulse.ar(freq * 1.9999, WhiteNoise.ar(1.0), 0.1),
+		SinOsc.ar(freq * 0.5),
+		PinkNoise.ar(0.01),
+		//Dust.ar(0.04, 0.3),
+		Saw.ar(freq * 2.750, 0.002),
+		Saw.ar(freq * 1.499, 0.003)]);
 
-	temp = Mix(BPF.ar(sig, formantFreqs, formantBandwidths / formantFreqs, formantAmps));
+	klang = DynKlank.ar(`[freqs, nil, ringtimes], sig * 0.5) * 0.001;
 
-	Decimator.ar(sig, 8);
+	temp = PitchShift.ar(sig, 0.2, 1.0001, 0.01, 0.02, 0.2);
 
-	sig = LPF.ar(sig, cutoff);
+	sig = Mix.ar([sig, klang, temp]);
 
-	//BLowShelf.ar(sig, freq: 1200.0, rs: 1.0, db: 5.0, mul: 1.0, add: 0.0);
+	sig = Decimator.ar(sig, bits: 8);
 
-	//sig = DelayN.ar(sig, 0.5, SinOsc.kr(572, 0, 0.5, 1));
+	sig = RLPF.ar(sig, cutoff);
+
+	sig = BPF.ar(sig, fbank);
+
+	temp = CombN.ar(sig, 0.4, 0.4, 1.0, 0.6);
+
+	sig = Mix.ar([sig, klang, temp]);
+
+	klang = CombN.ar(sig, 0.6, Dust.kr(1, 0.6), 1.3, 0.4);
+
+	32.do({ arg o,
+			sig = AllpassN.ar(sig, 0.01, XLine.kr(0.0001, 0.01, 20), 7);
+		});
 
 	sig = Compander.ar(sig, sig, thresh: 0.25, slopeBelow: 1.0, slopeAbove: 0.125,
 		clampTime: 0.01, relaxTime: 0.09);
 
-	//sig = FreeVerb2.ar(sig, sig, 0.75, 0.8, 0.5);
+	sig = BLowShelf.ar(sig, freq: 480.0, rs: 1.0, db: 15.0, mul: 1.0, add: 0.0);
 
 	Out.ar(out, sig * 0.75 * amp * env);
 
-	Out.ar(fxout, sig * 1.5 * amp * env);
+	Out.ar(~subChannel, sig * 0.4 * amp * env);
+
+	Out.ar(fxout, sig * 2.5 * amp * env);
 
 }).add;
 
@@ -172,17 +190,11 @@ SynthDef(\dryIO, { // compressor on the dry bus
 
 	arg out = 0, fxout = 0, in = 0, amp = 1, lcut = 20000, hcut = 30, bit = 24, klangmix = 0.0, mix = 0.1, revmix = 0;
 
-	var sig = In.ar(in, 1), sum, freqs, ringtimes, klang,
+	var sig = In.ar(in, 1), sum,
 
 	dry = sig,
-	wet = Decimator.ar(sig, bits: bit);
-	freqs = Control.names([\freqs]).kr([800, 1071, 1153, 1723]);
-    ringtimes = Control.names([\ringtimes]).kr([1, 1, 1, 1]);
-	klang = DynKlank.ar(`[freqs, nil, ringtimes], wet * 0.5);
-	wet = Mix.ar([klang * klangmix, wet * (1 - klangmix)]);
 
-
-	wet = LPF.ar(wet, lcut);
+	wet = LPF.ar(dry, lcut);
 	wet = HPF.ar(wet, hcut);
 	sum = Mix.ar([dry * (1 - mix), wet * mix]);
 
@@ -217,12 +229,14 @@ s.sync;
 ~fxBus = Array.fill(~pbOuts, { Bus.audio(s, 1)});
 ~mixBus = Array.fill(~pbOuts, { Bus.audio(s, 1)});
 ~outBus = Array.fill(~pbOuts, { Bus.audio(s, 1)});
+~subBus =  Array.fill(~pbOuts, { Bus.audio(s, 1)});
 
 ~dryGroup = Group.tail(s);
 ~synthGroup = Group.tail(s);
 ~fxGroup = Group.tail(s);
 ~mixGroup = Group.tail(s);
 ~outGroup = Group.tail(s);
+~subGroup = Group.tail(s);
 
 "APP: LOADING ⬛⬛⬛⬜⬜".postln;
 
@@ -235,20 +249,6 @@ s.sync;
 	], ~dryGroup);
 
 });
-
-~synths = Array.fill(10,
-	{
-
-	arg i;
-
-		Synth(\klankSaw,
-			[
-				\out, ~dryBus[i],
-				\fxout, ~fxBus[i],
-				\freq, 69.7,
-				\amp, 0.0
-			], ~dryGroup);
-	});
 
 
 ~fxSynth = Array.fill(~pbOuts, {
@@ -311,7 +311,7 @@ s.sync;
 
 	arg msg;
 
-	var addr = msg[0].asString, player, counter, zoneFlag = false;
+	var addr = msg[0].asString, player, counter, alive, zone, map;
 
 	if("Pelvis".matchRegexp(addr), {
 
@@ -350,36 +350,42 @@ s.sync;
 		z[7] = ~blobs.at(player).at(\x).gaussCurve(1.0, 0.2, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, 0.5, 0.1);
 		z[8] = ~blobs.at(player).at(\x).gaussCurve(1.0, 0.6, 0.1) + ~blobs.at(player).at(\y).gaussCurve(1.0, 0.5, 0.1);
 
+
 		~blobs.at(player).add(\map -> z);
 		~blobs.at(player).add(\zone -> z.maxIndex);
 
-
-		switch( ~state,
-
-			\idle, { },
-
-			\osc, {
-
-				if (((counter == 0) && (~blobs.at(player).at(\zone) != ~blobs.at(player).at(\zone_))), {
+		alive = ~blobs.at(player).at(\alive);
+		zone = ~blobs.at(player).at(\zone);
+		map = ~blobs.at(player).at(\map);
 
 
-					~blobs.at(player).add(\zone_ -> ~blobs.at(player).at(\zone));
+			switch( ~state,
 
-					~blobs.at(player).at(\zone).postln;
+				\idle, { },
 
-					~blobs.at(player).at(\synth).set(
-						\trig, 0);
+				\osc, {
 
-					~blobs.at(player).add(\synth ->
+					if (alive == false, { ~blobs.at(player).at(\synth).set(\trig, 0); },
 
-						Synth(\klankSaw, [
-								\out, ~dryBus[~blobs.at(player).at(\zone)],
-								\fxout, ~fxBus[~blobs.at(player).at(\zone_)],
-								\freq, 69.7,
-								\trig, 1,
-								\amp, 0.2
-							], ~dryGroup);
-						);
+					{
+						if ((zone != ~blobs.at(player).at(\zone_)), {
+							~blobs.at(player).add(\zone_ -> zone);
+							~blobs.at(player).at(\zone).postln;
+							~blobs.at(player).at(\synth).set(\trig, 0);
+							~blobs.at(player).add(\synth ->
+								Synth(\klankSaw, [
+									\out, ~dryBus[zone],
+									\fxout, ~fxBus[zone],
+									\freq, ~ftable[15.rand],
+									\trig, 1,
+									\amp, 0.4
+								], ~dryGroup ); ); });
+
+						if ((~blobs.at(player).at(\synth).notNil), {
+							~blobs.at(player).at(\synth).set(\cutoff, map[zone].linlin(0, 2, 200, 16000));
+							~blobs.at(player).at(\synth).set(\fbank, ~blobs.at(player).at(\z)
+									.linlin(-1.0, 1.0, 100, 3800, clip:\minmax));
+						});
 					});
 
 				},
@@ -513,37 +519,6 @@ s.meter (~hardwareInputs, ~hardwareOutputs);
 		}, 0, false, 80, 45).value_(0.0)
 	.setColors(Color.grey,Color.white);
 
-~fFader = EZSlider.new(
-	~w, Rect(20, 160, 430, 40),
-	"dry",
-	ControlSpec.new(0.0, 1.0, \lin, 0.01, 0, ""), {
-		arg slider;
-		~pbOuts.do {
-			arg i;
-			~drySynth[i].set(
-				\amp,
-				slider.value)
-			};
-		}, 0, false, 80, 45).value_(0.0)
-	.setColors(Color.grey,Color.white);
-
-
-	~fFader = EZSlider.new(
-	~w, Rect(20, 160, 430, 40),
-	"dry",
-	ControlSpec.new(60, 90, \lin, 0.01, 0, ""), {
-		arg slider;
-		10.do {
-			arg i;
-			~synths[i].set(
-				\freq,
-				slider.value)
-			};
-		}, 0, false, 80, 45).value_(0.0)
-	.setColors(Color.grey,Color.white);
-
-
-
 b = Button(~w, Rect(20, 20, 340, 30))
 	.states_([
 		["Manually Trigger Audio", Color.black, Color.grey],
@@ -581,7 +556,7 @@ b = Button(~w, Rect(20, 20, 340, 30))
 					\instrument, \mPlayer,
 					\env, 1,
 					\dur, Pwhite(0.01, 0.3, rrand(2, 12)),
-					\cutoff, Pwhite(800, 16000),
+					\cutoff, Pwhite(300, 3000),
 					\buf, Pshuf(~ahBuf, inf),
 					\out, Pseq([~dryBus[0], ~fxBus[0]], inf);
 				).play;
