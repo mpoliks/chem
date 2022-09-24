@@ -569,6 +569,63 @@ b = Button(~w, Rect(20, 20, 340, 30))
 		);
 	});
 
+b = Button(~w, Rect(20, 20, 340, 30))
+	.states_([
+		["Saw Test", Color.black, Color.grey],
+		["Test Off", Color.white, Color.grey],
+	])
+	.action_({
+		|state|
+		~targetOverride = true;
+		switch(state.value,
+			1, {
+
+				var z = rrand(0, 9),
+				f = rrand(0, ~ftable.size);
+
+				Pbind(
+					\instrument, \klankSaw,
+					\env, 1,
+					\dur, Pwhite(1, 10, rrand(2, 12)),
+					\freq, ~ftable[f],
+					\cutoff, Env(
+						[800, 16000, 800],
+						[20.0, 38.0],
+						\sin),
+					\fbank, Env(
+						[200, 16000, 7000],
+						[33.0, 26.0],
+						\sin),
+					\fxout, Pseq([
+						~fxBus[0],
+						~fxBus[1],
+						~fxBus[2],
+						~fxBus[3],
+						~fxBus[4],
+						~fxBus[5],
+						~fxBus[6],
+						~fxBus[7],
+						~fxBus[8],
+						~fxBus[9]], inf),
+					\out, Pseq([
+						~dryBus[0],
+						~dryBus[1],
+						~dryBus[2],
+						~dryBus[3],
+						~dryBus[4],
+						~dryBus[5],
+						~dryBus[6],
+						~dryBus[7],
+						~dryBus[8],
+						~dryBus[9]], inf)
+				).play;
+			},
+
+			0, {
+			}
+		);
+	});
+
 "APP: LOADED  ⬛⬛⬛⬛⬛ ----- COMPLETE".postln;
 
 })
